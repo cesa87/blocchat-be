@@ -161,6 +161,178 @@ pub fn cleanup_expired(session_store: &SessionStore, nonce_store: &NonceStore) {
     }
 }
 
+/// Get analytics data from database
+pub async fn get_analytics(pool: &sqlx::PgPool) -> Result<crate::models::AnalyticsResponse> {
+    use crate::models::*;
+    
+    // Get transaction metrics
+    let tx_metrics = sqlx::query!(
+        r#"
+        SELECT 
+            COUNT(*) as total,
+            SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+            SUM(CASE WHEN status = 'confirmed' THEN 1 ELSE 0 END) as confirmed,
+            SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+        FROM transactions
+        "#
+    )
+    .fetch_one(pool)
+    .await?;
+    
+    // Get unique user count (distinct addresses)
+    let user_count = sqlx::query!(
+        r#"
+        SELECT COUNT(DISTINCT from_address) as total FROM transactions
+        "#
+    )
+    .fetch_one(pool)
+    .await?;
+    
+    // Get platform metrics
+    let platform_metrics = sqlx::query!(
+        r#"
+        SELECT 
+            (SELECT COUNT(*) FROM token_gates) as token_gates,
+            (SELECT COUNT(*) FROM shops) as shops,
+            (SELECT COUNT(*) FROM shop_items) as shop_items
+        "#
+    )
+    .fetch_one(pool)
+    .await?;
+    
+    Ok(AnalyticsResponse {
+        users: UserMetrics {
+            total_users: user_count.total.unwrap_or(0),
+            active_24h: 0, // TODO: implement with user activity tracking
+            active_7d: 0,
+        },
+        transactions: TransactionMetrics {
+            total_transactions: tx_metrics.total.unwrap_or(0),
+            total_volume_usd: 0.0, // TODO: implement with price oracle
+            pending: tx_metrics.pending.unwrap_or(0),
+            confirmed: tx_metrics.confirmed.unwrap_or(0),
+            failed: tx_metrics.failed.unwrap_or(0),
+        },
+        platform: PlatformMetrics {
+            active_escrows: 0, // TODO: query from smart contract
+            token_gates: platform_metrics.token_gates.unwrap_or(0),
+            shops: platform_metrics.shops.unwrap_or(0),
+            shop_items: platform_metrics.shop_items.unwrap_or(0),
+        },
+    })
+}
+
+/// Get recent transactions for admin view
+pub async fn get_recent_transactions(
+    pool: &sqlx::PgPool,
+    limit: i64,
+) -> Result<crate::models::RecentTransactionsResponse> {
+    use crate::models::*;
+    
+    let transactions = sqlx::query_as::<_, Transaction>(
+        r#"
+        SELECT 
+            id, tx_hash, from_address, to_address, amount, 
+            token_address, chain_id, conversation_id, message_id,
+            status, block_number, created_at, confirmed_at
+        FROM transactions
+        ORDER BY created_at DESC
+        LIMIT $1
+        "#
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    
+    let total = sqlx::query!("SELECT COUNT(*) as count FROM transactions")
+        .fetch_one(pool)
+        .await?
+        .count
+        .unwrap_or(0);
+    
+    let transaction_views: Vec<AdminTransactionView> = transactions
+        .into_iter()
+        .map(|tx| AdminTransactionView {
+            id: tx.id.to_string(),
+            tx_hash: tx.tx_hash,
+            from_address: tx.from_address,
+            to_address: tx.to_address,
+            amount: tx.amount,
+            token_address: tx.token_address,
+            status: format!("{:?}", tx.status).to_lowercase(),
+            created_at: tx.created_at.to_rfc3339(),
+            conversation_id: tx.conversation_id,
+        })
+        .collect();
+    
+    Ok(RecentTransactionsResponse {
+        transactions: transaction_views,
+        total,
+    })
+}
+
+/// Get system health metrics
+pub async fn get_system_health(pool: &sqlx::PgPool) -> Result<crate::models::SystemHealthResponse> {
+    use crate::models::*;
+    use std::time::SystemTime;
+    
+    // Get database size
+    let db_size = sqlx::query!(
+        "SELECT pg_database_size(current_database()) as size"
+    )
+    .fetch_one(pool)
+    .await?;
+    
+    // Get table counts
+    let table_counts = sqlx::query!(
+        r#"
+        SELECT 
+            (SELECT COUNT(*) FROM transactions) as transactions,
+            (SELECT COUNT(*) FROM token_gates) as token_gates,
+            (SELECT COUNT(*) FROM shops) as shops,
+            (SELECT COUNT(*) FROM shop_items) as shop_items
+        "#
+    )
+    .fetch_one(pool)
+    .await?;
+    
+    // Get connection count
+    let connections = sqlx::query!(
+        "SELECT COUNT(*) as count FROM pg_stat_activity WHERE datname = current_database()"
+    )
+    .fetch_one(pool)
+    .await?;
+    
+    // Calculate uptime (placeholder - in production, track service start time)
+    let uptime = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    
+    Ok(SystemHealthResponse {
+        backend: ServiceStatus {
+            status: "healthy".to_string(),
+            uptime_seconds: uptime % 86400, // Reset daily for demo
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+        database: DatabaseStatus {
+            status: "healthy".to_string(),
+            connections: connections.count.unwrap_or(0) as i32,
+            size_mb: db_size.size.unwrap_or(0) as f64 / (1024.0 * 1024.0),
+            table_counts: TableCounts {
+                transactions: table_counts.transactions.unwrap_or(0),
+                token_gates: table_counts.token_gates.unwrap_or(0),
+                shops: table_counts.shops.unwrap_or(0),
+                shop_items: table_counts.shop_items.unwrap_or(0),
+            },
+        },
+        resources: ResourceStatus {
+            disk_usage_percent: 0.0, // TODO: implement with system metrics
+            memory_mb: 0,
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

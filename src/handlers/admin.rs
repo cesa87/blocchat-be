@@ -1,4 +1,5 @@
 use actix_web::{cookie::Cookie, get, post, web, HttpResponse, Responder, Scope};
+use sqlx::PgPool;
 use std::env;
 
 use crate::{
@@ -8,10 +9,15 @@ use crate::{
 
 pub fn configure() -> Scope {
     web::scope("/admin")
+        // Public auth endpoints
         .service(get_nonce)
         .service(authenticate)
         .service(check_auth)
         .service(logout)
+        // Protected data endpoints (TODO: add middleware)
+        .service(get_analytics)
+        .service(get_transactions)
+        .service(get_health)
 }
 
 /// Get a nonce for wallet signing
@@ -203,4 +209,56 @@ fn get_admin_addresses() -> Vec<String> {
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+// ===== Protected Admin Data Endpoints =====
+
+/// Get analytics data
+#[get("/analytics")]
+async fn get_analytics(pool: web::Data<PgPool>) -> impl Responder {
+    match admin_service::get_analytics(&pool).await {
+        Ok(analytics) => HttpResponse::Ok().json(analytics),
+        Err(e) => {
+            log::error!("Failed to get analytics: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to fetch analytics"
+            }))
+        }
+    }
+}
+
+/// Get recent transactions
+#[get("/transactions")]
+async fn get_transactions(
+    pool: web::Data<PgPool>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> impl Responder {
+    let limit = query
+        .get("limit")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(50);
+    
+    match admin_service::get_recent_transactions(&pool, limit).await {
+        Ok(response) => HttpResponse::Ok().json(response),
+        Err(e) => {
+            log::error!("Failed to get transactions: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to fetch transactions"
+            }))
+        }
+    }
+}
+
+/// Get system health
+#[get("/health")]
+async fn get_health(pool: web::Data<PgPool>) -> impl Responder {
+    match admin_service::get_system_health(&pool).await {
+        Ok(health) => HttpResponse::Ok().json(health),
+        Err(e) => {
+            log::error!("Failed to get system health: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to fetch system health"
+            }))
+        }
+    }
 }
