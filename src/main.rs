@@ -1,12 +1,17 @@
 use actix_cors::Cors;
 use actix_web::{web, App, HttpServer, middleware::Logger};
 use dotenv::dotenv;
+use std::collections::HashMap;
 use std::env;
+use std::sync::{Arc, RwLock};
 
 mod handlers;
 mod models;
 mod services;
 mod db;
+mod middleware;
+
+use models::{NonceStore, SessionStore};
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -32,6 +37,12 @@ async fn main() -> std::io::Result<()> {
     
     log::info!("✓ Database connection established");
     
+    // Initialize session and nonce stores
+    let session_store: SessionStore = Arc::new(RwLock::new(HashMap::new()));
+    let nonce_store: NonceStore = Arc::new(RwLock::new(HashMap::new()));
+    
+    log::info!("✓ Session and nonce stores initialized");
+    
     // Get CORS origins
     let cors_origins = env::var("CORS_ALLOWED_ORIGINS")
         .unwrap_or_else(|_| "http://localhost:5173".to_string());
@@ -50,15 +61,19 @@ async fn main() -> std::io::Result<()> {
                 actix_web::http::header::ACCEPT,
                 actix_web::http::header::CONTENT_TYPE,
             ])
+            .supports_credentials()
             .max_age(3600);
         
         App::new()
             .app_data(web::Data::new(db_pool.clone()))
+            .app_data(web::Data::new(session_store.clone()))
+            .app_data(web::Data::new(nonce_store.clone()))
             .wrap(Logger::default())
             .wrap(cors)
             .service(
                 web::scope("/api")
                     .service(handlers::health::health_check)
+                    .service(handlers::admin::configure())
                     .service(handlers::payments::configure())
                     .service(handlers::token_gates::configure())
                     .service(handlers::shops::configure())
