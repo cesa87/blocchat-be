@@ -7,12 +7,12 @@ use crate::services::profile_service;
 pub fn configure() -> Scope {
     web::scope("/profiles")
         .service(get_or_create)
-        .service(get_by_wallet)
+        .service(search)  // Must come before /{wallet_address}
+        .service(check_username)
         .service(get_by_username)
         .service(claim_username)
         .service(update_profile)
-        .service(search)
-        .service(check_username)
+        .service(get_by_wallet)  // Must come last since it catches any path
 }
 
 /// Get or create profile (called on app load)
