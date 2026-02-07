@@ -491,6 +491,7 @@ dependencies = [
  "hex",
  "log",
  "rand 0.8.5",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

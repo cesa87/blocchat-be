@@ -38,3 +38,6 @@ reqwest = { version = "0.11", features = ["json"] }
 hex = "0.4"
 sha3 = "0.10"
 rand = "0.8"
+
+# Validation
+regex = "1.10"

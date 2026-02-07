@@ -74,6 +74,7 @@ async fn main() -> std::io::Result<()> {
                 web::scope("/api")
                     .service(handlers::health::health_check)
                     .service(handlers::admin::configure())
+                    .service(handlers::profiles::configure())
                     .service(handlers::payments::configure())
                     .service(handlers::token_gates::configure())
                     .service(handlers::shops::configure())
