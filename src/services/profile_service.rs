@@ -102,6 +102,18 @@ pub async fn get_profile_by_username(pool: &DbPool, username: &str) -> Result<Us
     Ok(profile)
 }
 
+/// Get profile by inbox_id
+pub async fn get_profile_by_inbox_id(pool: &DbPool, inbox_id: &str) -> Result<UserProfile> {
+    let profile = sqlx::query_as::<_, UserProfile>(
+        "SELECT * FROM user_profiles WHERE inbox_id = $1"
+    )
+    .bind(inbox_id)
+    .fetch_one(pool)
+    .await?;
+    
+    Ok(profile)
+}
+
 /// Check if username is available
 pub async fn is_username_available(pool: &DbPool, username: &str, current_wallet: &str) -> Result<bool> {
     let result = sqlx::query!(
@@ -214,7 +226,7 @@ pub async fn update_profile(
     Ok(updated)
 }
 
-/// Search profiles by username or wallet address
+/// Search profiles by username, wallet address, or inbox_id
 pub async fn search_profiles(pool: &DbPool, query: &str, limit: i64) -> Result<Vec<SearchResult>> {
     let search_pattern = format!("%{}%", query.to_lowercase());
     
@@ -225,13 +237,19 @@ pub async fn search_profiles(pool: &DbPool, query: &str, limit: i64) -> Result<V
             LOWER(username) LIKE $1
             OR LOWER(display_name) LIKE $1
             OR LOWER(wallet_address) LIKE $1
+            OR inbox_id = $2
         ORDER BY 
-            CASE WHEN LOWER(username) = $2 THEN 1 ELSE 2 END,
+            CASE 
+                WHEN inbox_id = $2 THEN 0
+                WHEN LOWER(username) = $3 THEN 1 
+                ELSE 2 
+            END,
             created_at DESC
-        LIMIT $3
+        LIMIT $4
         "#
     )
     .bind(&search_pattern)
+    .bind(query)  // Exact match for inbox_id
     .bind(query.to_lowercase())
     .bind(limit)
     .fetch_all(pool)

@@ -10,6 +10,7 @@ pub fn configure() -> Scope {
         .service(search)  // Must come before /{wallet_address}
         .service(check_username)
         .service(get_by_username)
+        .service(get_by_inbox_id)
         .service(claim_username)
         .service(update_profile)
         .service(get_by_wallet)  // Must come last since it catches any path
@@ -70,6 +71,20 @@ async fn get_by_username(
         Ok(profile) => HttpResponse::Ok().json(ProfileResponse::from(profile)),
         Err(_) => HttpResponse::NotFound().json(serde_json::json!({
             "error": "User not found"
+        })),
+    }
+}
+
+/// Get profile by inbox_id
+#[get("/inbox/{inbox_id}")]
+async fn get_by_inbox_id(
+    pool: web::Data<PgPool>,
+    inbox_id: web::Path<String>,
+) -> impl Responder {
+    match profile_service::get_profile_by_inbox_id(&pool, &inbox_id).await {
+        Ok(profile) => HttpResponse::Ok().json(ProfileResponse::from(profile)),
+        Err(_) => HttpResponse::NotFound().json(serde_json::json!({
+            "error": "Profile not found"
         })),
     }
 }
