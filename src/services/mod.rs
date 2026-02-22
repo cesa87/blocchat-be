@@ -3,3 +3,4 @@ pub mod token_gate_service;
 pub mod shop_service;
 pub mod admin_service;
 pub mod profile_service;
+pub mod group_service;

@@ -4,3 +4,5 @@ pub mod token_gates;
 pub mod shops;
 pub mod admin;
 pub mod profiles;
+pub mod typing;
+pub mod groups;

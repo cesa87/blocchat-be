@@ -12,6 +12,7 @@ mod db;
 mod middleware;
 
 use models::{NonceStore, SessionStore};
+use handlers::typing::TypingStore;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -37,11 +38,12 @@ async fn main() -> std::io::Result<()> {
     
     log::info!("✓ Database connection established");
     
-    // Initialize session and nonce stores
+    // Initialize session, nonce, and typing stores
     let session_store: SessionStore = Arc::new(RwLock::new(HashMap::new()));
     let nonce_store: NonceStore = Arc::new(RwLock::new(HashMap::new()));
+    let typing_store = web::Data::new(TypingStore::new(HashMap::new()));
     
-    log::info!("✓ Session and nonce stores initialized");
+    log::info!("✓ Session, nonce, and typing stores initialized");
     
     // Get CORS origins
     let cors_origins = env::var("CORS_ALLOWED_ORIGINS")
@@ -68,6 +70,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(db_pool.clone()))
             .app_data(web::Data::new(session_store.clone()))
             .app_data(web::Data::new(nonce_store.clone()))
+            .app_data(typing_store.clone())
             .wrap(Logger::default())
             .wrap(cors)
             .service(
@@ -78,6 +81,8 @@ async fn main() -> std::io::Result<()> {
                     .service(handlers::payments::configure())
                     .service(handlers::token_gates::configure())
                     .service(handlers::shops::configure())
+                    .service(handlers::typing::configure())
+                    .service(handlers::groups::configure())
             )
     })
     .bind(&bind_address)?
