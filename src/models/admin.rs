@@ -82,6 +82,7 @@ pub struct PlatformMetrics {
     pub token_gates: i64,
     pub shops: i64,
     pub shop_items: i64,
+    pub groups: i64,
 }
 
 // System health response
@@ -139,4 +140,41 @@ pub struct AdminTransactionView {
     pub status: String,
     pub created_at: String,
     pub conversation_id: String,
+}
+
+// Admin users response
+#[derive(Debug, Serialize)]
+pub struct AdminUsersResponse {
+    pub users: Vec<AdminUserView>,
+    pub total: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminUserView {
+    pub wallet_address: String,
+    pub username: Option<String>,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub bio: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+// Admin groups response
+#[derive(Debug, Serialize)]
+pub struct AdminGroupsResponse {
+    pub groups: Vec<AdminGroupView>,
+    pub total: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminGroupView {
+    pub id: String,
+    pub conversation_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub owner_wallet: String,
+    pub is_public: bool,
+    pub member_count: i32,
+    pub created_at: String,
 }

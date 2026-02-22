@@ -179,11 +179,23 @@ pub async fn get_analytics(pool: &sqlx::PgPool) -> Result<crate::models::Analyti
     .fetch_one(pool)
     .await?;
     
-    // Get unique user count (distinct addresses)
+    // Get total registered users from user_profiles
     let user_count = sqlx::query!(
-        r#"
-        SELECT COUNT(DISTINCT from_address) as total FROM transactions
-        "#
+        "SELECT COUNT(*) as total FROM user_profiles"
+    )
+    .fetch_one(pool)
+    .await?;
+    
+    // Get active users in last 24 hours
+    let active_24h = sqlx::query!(
+        "SELECT COUNT(*) as total FROM user_profiles WHERE updated_at > NOW() - INTERVAL '24 hours'"
+    )
+    .fetch_one(pool)
+    .await?;
+    
+    // Get active users in last 7 days
+    let active_7d = sqlx::query!(
+        "SELECT COUNT(*) as total FROM user_profiles WHERE updated_at > NOW() - INTERVAL '7 days'"
     )
     .fetch_one(pool)
     .await?;
@@ -200,24 +212,32 @@ pub async fn get_analytics(pool: &sqlx::PgPool) -> Result<crate::models::Analyti
     .fetch_one(pool)
     .await?;
     
+    // Get total groups count
+    let groups_count = sqlx::query!(
+        "SELECT COUNT(*) as total FROM public_groups"
+    )
+    .fetch_one(pool)
+    .await?;
+    
     Ok(AnalyticsResponse {
         users: UserMetrics {
             total_users: user_count.total.unwrap_or(0),
-            active_24h: 0, // TODO: implement with user activity tracking
-            active_7d: 0,
+            active_24h: active_24h.total.unwrap_or(0),
+            active_7d: active_7d.total.unwrap_or(0),
         },
         transactions: TransactionMetrics {
             total_transactions: tx_metrics.total.unwrap_or(0),
-            total_volume_usd: 0.0, // TODO: implement with price oracle
+            total_volume_usd: 0.0, // Requires price oracle integration
             pending: tx_metrics.pending.unwrap_or(0),
             confirmed: tx_metrics.confirmed.unwrap_or(0),
             failed: tx_metrics.failed.unwrap_or(0),
         },
         platform: PlatformMetrics {
-            active_escrows: 0, // TODO: query from smart contract
+            active_escrows: 0, // Requires on-chain query
             token_gates: platform_metrics.token_gates.unwrap_or(0),
             shops: platform_metrics.shops.unwrap_or(0),
             shop_items: platform_metrics.shop_items.unwrap_or(0),
+            groups: groups_count.total.unwrap_or(0),
         },
     })
 }
@@ -309,6 +329,12 @@ pub async fn get_system_health(pool: &sqlx::PgPool) -> Result<crate::models::Sys
         .unwrap()
         .as_secs();
     
+    // Get real memory usage of this process
+    let memory_mb = get_process_memory_mb();
+    
+    // Get disk usage percentage
+    let disk_usage = get_disk_usage_percent();
+    
     Ok(SystemHealthResponse {
         backend: ServiceStatus {
             status: "healthy".to_string(),
@@ -327,9 +353,164 @@ pub async fn get_system_health(pool: &sqlx::PgPool) -> Result<crate::models::Sys
             },
         },
         resources: ResourceStatus {
-            disk_usage_percent: 0.0, // TODO: implement with system metrics
-            memory_mb: 0,
+            disk_usage_percent: disk_usage,
+            memory_mb,
         },
+    })
+}
+
+/// Get process memory usage in MB by reading /proc/self/status (Linux)
+fn get_process_memory_mb() -> u64 {
+    // Read from /proc/self/status on Linux (where the server runs)
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+        for line in status.lines() {
+            if line.starts_with("VmRSS:") {
+                // Format: "VmRSS:    12345 kB"
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    if let Ok(kb) = parts[1].parse::<u64>() {
+                        return kb / 1024;
+                    }
+                }
+            }
+        }
+    }
+    0
+}
+
+/// Get disk usage percentage by reading statvfs
+fn get_disk_usage_percent() -> f32 {
+    // Use df command as a portable fallback
+    if let Ok(output) = std::process::Command::new("df")
+        .args(["-P", "/"])
+        .output()
+    {
+        if let Ok(stdout) = String::from_utf8(output.stdout) {
+            // Second line contains the data, 5th column is usage%
+            if let Some(line) = stdout.lines().nth(1) {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 5 {
+                    let pct_str = parts[4].trim_end_matches('%');
+                    if let Ok(pct) = pct_str.parse::<f32>() {
+                        return pct;
+                    }
+                }
+            }
+        }
+    }
+    0.0
+}
+
+/// Get admin users list
+pub async fn get_users(
+    pool: &sqlx::PgPool,
+    limit: i64,
+    search: Option<&str>,
+) -> Result<crate::models::AdminUsersResponse> {
+    use crate::models::*;
+    
+    let users = if let Some(query) = search {
+        let search_pattern = format!("%{}%", query.to_lowercase());
+        sqlx::query_as::<_, UserProfile>(
+            r#"
+            SELECT id, wallet_address, inbox_id, username, display_name, 
+                   avatar_url, bio, last_username_change, created_at, updated_at
+            FROM user_profiles
+            WHERE LOWER(wallet_address) LIKE $1 
+               OR LOWER(username) LIKE $1
+               OR LOWER(display_name) LIKE $1
+            ORDER BY created_at DESC
+            LIMIT $2
+            "#
+        )
+        .bind(&search_pattern)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, UserProfile>(
+            r#"
+            SELECT id, wallet_address, inbox_id, username, display_name, 
+                   avatar_url, bio, last_username_change, created_at, updated_at
+            FROM user_profiles
+            ORDER BY created_at DESC
+            LIMIT $1
+            "#
+        )
+        .bind(limit)
+        .fetch_all(pool)
+        .await?
+    };
+    
+    let total = sqlx::query!("SELECT COUNT(*) as count FROM user_profiles")
+        .fetch_one(pool)
+        .await?
+        .count
+        .unwrap_or(0);
+    
+    let user_views: Vec<AdminUserView> = users
+        .into_iter()
+        .map(|u| AdminUserView {
+            wallet_address: u.wallet_address,
+            username: u.username,
+            display_name: u.display_name,
+            avatar_url: u.avatar_url,
+            bio: u.bio,
+            created_at: u.created_at.to_rfc3339(),
+            updated_at: u.updated_at.to_rfc3339(),
+        })
+        .collect();
+    
+    Ok(AdminUsersResponse {
+        users: user_views,
+        total,
+    })
+}
+
+/// Get admin groups list
+pub async fn get_groups(
+    pool: &sqlx::PgPool,
+    limit: i64,
+) -> Result<crate::models::AdminGroupsResponse> {
+    use crate::models::*;
+    
+    let groups = sqlx::query_as::<_, PublicGroup>(
+        r#"
+        SELECT id, conversation_id, name, description, image_url,
+               owner_inbox_id, owner_wallet, is_public, member_count,
+               created_at, updated_at
+        FROM public_groups
+        ORDER BY member_count DESC, created_at DESC
+        LIMIT $1
+        "#
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    
+    let total = sqlx::query!("SELECT COUNT(*) as count FROM public_groups")
+        .fetch_one(pool)
+        .await?
+        .count
+        .unwrap_or(0);
+    
+    let group_views: Vec<AdminGroupView> = groups
+        .into_iter()
+        .map(|g| AdminGroupView {
+            id: g.id.to_string(),
+            conversation_id: g.conversation_id,
+            name: g.name,
+            description: g.description,
+            owner_wallet: g.owner_wallet,
+            is_public: g.is_public,
+            member_count: g.member_count,
+            created_at: g.created_at.to_rfc3339(),
+        })
+        .collect();
+    
+    Ok(AdminGroupsResponse {
+        groups: group_views,
+        total,
     })
 }
 

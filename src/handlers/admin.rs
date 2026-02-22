@@ -18,6 +18,9 @@ pub fn configure() -> Scope {
         .service(get_analytics)
         .service(get_transactions)
         .service(get_health)
+        .service(get_users)
+        .service(get_groups)
+        .service(get_disputes)
 }
 
 /// Get a nonce for wallet signing
@@ -261,4 +264,57 @@ async fn get_health(pool: web::Data<PgPool>) -> impl Responder {
             }))
         }
     }
+}
+
+/// Get registered users
+#[get("/users")]
+async fn get_users(
+    pool: web::Data<PgPool>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> impl Responder {
+    let limit = query
+        .get("limit")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(100);
+    let search = query.get("search").map(|s| s.as_str());
+    
+    match admin_service::get_users(&pool, limit, search).await {
+        Ok(response) => HttpResponse::Ok().json(response),
+        Err(e) => {
+            log::error!("Failed to get users: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to fetch users"
+            }))
+        }
+    }
+}
+
+/// Get public groups
+#[get("/groups")]
+async fn get_groups(
+    pool: web::Data<PgPool>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> impl Responder {
+    let limit = query
+        .get("limit")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(100);
+    
+    match admin_service::get_groups(&pool, limit).await {
+        Ok(response) => HttpResponse::Ok().json(response),
+        Err(e) => {
+            log::error!("Failed to get groups: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to fetch groups"
+            }))
+        }
+    }
+}
+
+/// Get active disputes (stub — disputes are on-chain escrow state)
+#[get("/disputes")]
+async fn get_disputes() -> impl Responder {
+    // Returns empty array for now. In the future, query on-chain escrow
+    // contract events for disputed escrows.
+    HttpResponse::Ok().json(serde_json::json!([]))
 }
