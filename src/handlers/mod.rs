@@ -6,3 +6,4 @@ pub mod admin;
 pub mod profiles;
 pub mod typing;
 pub mod groups;
+pub mod alpha_bot;

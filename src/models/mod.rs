@@ -4,6 +4,7 @@ pub mod shop;
 pub mod admin;
 pub mod profile;
 pub mod group;
+pub mod alpha_bot;
 
 pub use payment::*;
 pub use token_gate::*;

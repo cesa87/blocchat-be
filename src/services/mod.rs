@@ -4,3 +4,5 @@ pub mod shop_service;
 pub mod admin_service;
 pub mod profile_service;
 pub mod group_service;
+pub mod alpha_bot_service;
+pub mod event_watcher;

@@ -38,6 +38,11 @@ async fn main() -> std::io::Result<()> {
     
     log::info!("✓ Database connection established");
     
+    // Spawn Alpha Bot event watcher background task
+    let base_rpc_url = env::var("BASE_RPC_URL")
+        .unwrap_or_else(|_| "https://mainnet.base.org".to_string());
+    services::event_watcher::spawn(db_pool.clone(), base_rpc_url);
+    
     // Initialize session, nonce, and typing stores
     let session_store: SessionStore = Arc::new(RwLock::new(HashMap::new()));
     let nonce_store: NonceStore = Arc::new(RwLock::new(HashMap::new()));
@@ -83,6 +88,7 @@ async fn main() -> std::io::Result<()> {
                     .service(handlers::shops::configure())
                     .service(handlers::typing::configure())
                     .service(handlers::groups::configure())
+                    .service(handlers::alpha_bot::configure())
             )
     })
     .bind(&bind_address)?
