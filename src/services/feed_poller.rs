@@ -98,13 +98,14 @@ async fn poll_crypto(pool: &PgPool, sub: &FeedSubscription) -> anyhow::Result<()
         sub.source_id
     );
 
-    let price_resp: serde_json::Value = reqwest::Client::new()
+    let cg_key_for_price = std::env::var("COINGECKO_API_KEY").ok();
+    let mut price_req = reqwest::Client::new()
         .get(&price_url)
-        .header("Accept", "application/json")
-        .send()
-        .await?
-        .json()
-        .await?;
+        .header("Accept", "application/json");
+    if let Some(ref key) = cg_key_for_price {
+        price_req = price_req.header("x-cg-demo-api-key", key);
+    }
+    let price_resp: serde_json::Value = price_req.send().await?.json().await?;
 
     let coin_data: CoinGeckoPrice = serde_json::from_value(
         price_resp.get(&sub.source_id).cloned().unwrap_or_default(),
@@ -119,7 +120,13 @@ async fn poll_crypto(pool: &PgPool, sub: &FeedSubscription) -> anyhow::Result<()
     let current_price = coin_data.usd;
 
     // ── 2. Fetch OHLC candles (daily, last 1 day = hourly candles) ──
-    let candles = fetch_ohlc_candles(&sub.source_id).await.unwrap_or_default();
+    let cg_api_key = std::env::var("COINGECKO_API_KEY").ok();
+    let candles = fetch_ohlc_candles(&sub.source_id, cg_api_key.as_deref())
+        .await
+        .unwrap_or_else(|e| {
+            log::warn!("OHLC fetch failed for {}: {}", sub.source_id, e);
+            serde_json::json!([])
+        });
 
     // ── 3. Get previous snapshot price for crossing detection ──
     let prev_price = feed_service::get_latest_snapshot(pool, &sub.id)
@@ -172,7 +179,7 @@ async fn poll_crypto(pool: &PgPool, sub: &FeedSubscription) -> anyhow::Result<()
     Ok(())
 }
 
-async fn fetch_ohlc_candles(coin_id: &str) -> anyhow::Result<serde_json::Value> {
+async fn fetch_ohlc_candles(coin_id: &str, api_key: Option<&str>) -> anyhow::Result<serde_json::Value> {
     // CoinGecko OHLC: returns [[timestamp_ms, open, high, low, close], ...]
     // days=1 gives hourly candles for the last 24h
     let url = format!(
@@ -180,13 +187,17 @@ async fn fetch_ohlc_candles(coin_id: &str) -> anyhow::Result<serde_json::Value> 
         coin_id
     );
 
-    let raw: Vec<Vec<f64>> = reqwest::Client::new()
+    let mut req = reqwest::Client::new()
         .get(&url)
-        .header("Accept", "application/json")
-        .send()
-        .await?
-        .json()
-        .await?;
+        .header("Accept", "application/json");
+    if let Some(key) = api_key {
+        req = req.header("x-cg-demo-api-key", key);
+    }
+    let resp = req.send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("CoinGecko OHLC returned {}", resp.status());
+    }
+    let raw: Vec<Vec<f64>> = resp.json().await?;
 
     // Convert to [{time, open, high, low, close}] for lightweight-charts
     let candles: Vec<serde_json::Value> = raw
