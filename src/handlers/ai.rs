@@ -1,7 +1,7 @@
 use actix_web::{post, web, HttpResponse, Responder, Scope};
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
-use tokio::time::sleep;
+use serde_json::json;
+use std::env;
 
 #[derive(Deserialize)]
 pub struct AskAIRequest {
@@ -14,37 +14,94 @@ pub struct AskAIResponse {
     pub answer: String,
 }
 
+#[derive(Deserialize)]
+struct GeminiPart {
+    text: String,
+}
+
+#[derive(Deserialize)]
+struct GeminiContent {
+    parts: Vec<GeminiPart>,
+}
+
+#[derive(Deserialize)]
+struct GeminiCandidate {
+    content: GeminiContent,
+}
+
+#[derive(Deserialize)]
+struct GeminiResponse {
+    candidates: Option<Vec<GeminiCandidate>>,
+}
+
 #[post("/conversations/{conversation_id}/ask")]
 async fn ask_ai(
     _conversation_id: web::Path<String>,
     req: web::Json<AskAIRequest>,
 ) -> impl Responder {
-    // Mock delay to simulate thinking
-    sleep(Duration::from_secs(2)).await;
-
-    let answer = if let Some(context) = &req.context_message {
-        format!(
-            "🤖 **Fact Check Analysis**\n\nI analyzed the statement: \"{}\"\n\n**Verdict:** Needs Verification\n\n**Details:**\nThis claim requires checking on-chain data. Based on general knowledge, similar mechanisms exist but specifics vary by protocol.\n\n(This is a mock AI response)",
-            context
-        )
-    } else {
-        format!(
-            "🤖 **AI Assistant**\n\n**Question:** {}\n\n**Answer:**\nThis is a simulated response from the AI assistant. In a production environment, this would call an LLM API to provide a detailed explanation.\n\n(This is a mock AI response)",
-            req.prompt
-        )
+    let api_key = match env::var("GEMINI_API_KEY") {
+        Ok(key) => key,
+        Err(_) => return HttpResponse::InternalServerError().json(AskAIResponse {
+            answer: "Error: GEMINI_API_KEY not set on server.".to_string(),
+        }),
     };
 
-    // In a real implementation, we would post this message to the conversation via XMTP or internal DB.
-    // For now, we return it to the frontend to display (or frontend posts it).
-    // The frontend logic I wrote earlier doesn't post the message, it just sends the request.
-    // I should probably have the frontend post the "answer" as a message from the user (if "Assistant" mode is client-side)
-    // or better, the backend should insert it into the message stream if possible.
-    
-    // Since I can't easily inject into XMTP stream from here without keys, returning it is fine.
-    // The frontend `handleAskAI` catches the response but currently does nothing with it except `alert`.
-    // I should update frontend `ChatWindow.tsx` to display the response or send it as a message.
+    let prompt_text = if let Some(context) = &req.context_message {
+        format!(
+            "Context: {}\n\nUser Question: {}",
+            context, req.prompt
+        )
+    } else {
+        req.prompt.clone()
+    };
 
-    HttpResponse::Ok().json(AskAIResponse { answer })
+    let client = reqwest::Client::new();
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}",
+        api_key
+    );
+
+    let request_body = json!({
+        "contents": [{
+            "parts": [{
+                "text": prompt_text
+            }]
+        }]
+    });
+
+    match client.post(&url).json(&request_body).send().await {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                match resp.json::<GeminiResponse>().await {
+                    Ok(gemini_resp) => {
+                        if let Some(candidates) = gemini_resp.candidates {
+                            if let Some(first_candidate) = candidates.first() {
+                                if let Some(first_part) = first_candidate.content.parts.first() {
+                                    return HttpResponse::Ok().json(AskAIResponse {
+                                        answer: first_part.text.clone(),
+                                    });
+                                }
+                            }
+                        }
+                        HttpResponse::InternalServerError().json(AskAIResponse {
+                            answer: "Error: No valid response content from AI.".to_string(),
+                        })
+                    }
+                    Err(e) => HttpResponse::InternalServerError().json(AskAIResponse {
+                        answer: format!("Error parsing AI response: {}", e),
+                    }),
+                }
+            } else {
+                let error_text = resp.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+                HttpResponse::InternalServerError().json(AskAIResponse {
+                    answer: format!("Error calling AI API: {}", error_text),
+                })
+            }
+        }
+        Err(e) => HttpResponse::InternalServerError().json(AskAIResponse {
+            answer: format!("Error sending request to AI API: {}", e),
+        }),
+    }
 }
 
 pub fn configure() -> Scope {
