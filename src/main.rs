@@ -42,6 +42,7 @@ async fn main() -> std::io::Result<()> {
     let base_rpc_url = env::var("BASE_RPC_URL")
         .unwrap_or_else(|_| "https://mainnet.base.org".to_string());
     services::event_watcher::spawn(db_pool.clone(), base_rpc_url);
+    services::feed_poller::spawn(db_pool.clone());
     
     // Initialize session, nonce, and typing stores
     let session_store: SessionStore = Arc::new(RwLock::new(HashMap::new()));
@@ -90,6 +91,7 @@ async fn main() -> std::io::Result<()> {
                     .service(handlers::groups::configure())
                     .service(handlers::alpha_bot::configure())
                     .service(handlers::ai::configure())
+                    .service(handlers::feeds::configure())
             )
     })
     .bind(&bind_address)?

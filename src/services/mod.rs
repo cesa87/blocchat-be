@@ -6,3 +6,5 @@ pub mod profile_service;
 pub mod group_service;
 pub mod alpha_bot_service;
 pub mod event_watcher;
+pub mod feed_service;
+pub mod feed_poller;

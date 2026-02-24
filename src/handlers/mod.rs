@@ -8,3 +8,4 @@ pub mod typing;
 pub mod groups;
 pub mod alpha_bot;
 pub mod ai;
+pub mod feeds;
