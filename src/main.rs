@@ -89,6 +89,7 @@ async fn main() -> std::io::Result<()> {
                     .service(handlers::typing::configure())
                     .service(handlers::groups::configure())
                     .service(handlers::alpha_bot::configure())
+                    .service(handlers::ai::configure())
             )
     })
     .bind(&bind_address)?
