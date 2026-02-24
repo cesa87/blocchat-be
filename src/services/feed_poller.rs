@@ -72,7 +72,10 @@ async fn run_loop(pool: PgPool) {
 
 async fn poll_subscription(pool: &PgPool, sub: &FeedSubscription) -> anyhow::Result<()> {
     match sub.feed_type.as_str() {
-        "crypto" => poll_crypto(pool, sub).await,
+        "crypto"      => poll_crypto(pool, sub).await,
+        "nft"         => poll_nft(pool, sub).await,
+        "defi_tvl"    => poll_defi_tvl(pool, sub).await,
+        "fear_greed"  => poll_fear_greed(pool, sub).await,
         other => {
             log::warn!("Feed poller: unsupported feed_type '{}', skipping", other);
             Ok(())
@@ -330,4 +333,221 @@ async fn evaluate_trigger(
         Ok(_) => log::info!("📡 Feed trigger fired: {} for sub {}", title, sub.id),
         Err(e) => log::error!("Feed poller: failed to insert event: {}", e),
     }
+}
+
+// ═══════════════════════════════════════════════════════════
+// NFT Floor Price — CoinGecko /nfts/{id}
+// ═══════════════════════════════════════════════════════════
+
+async fn poll_nft(pool: &PgPool, sub: &FeedSubscription) -> anyhow::Result<()> {
+    let url = format!("https://api.coingecko.com/api/v3/nfts/{}", sub.source_id);
+
+    let cg_key = std::env::var("COINGECKO_API_KEY").ok();
+    let mut req = reqwest::Client::new()
+        .get(&url)
+        .header("Accept", "application/json");
+    if let Some(ref key) = cg_key {
+        req = req.header("x-cg-demo-api-key", key);
+    }
+    let resp = req.send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("CoinGecko NFT returned {}", resp.status());
+    }
+    let raw: serde_json::Value = resp.json().await?;
+
+    let floor_price_usd = raw["floor_price"]["usd"].as_f64();
+    let pct_change_24h   = raw["floor_price_in_usd_24h_percentage_change"].as_f64();
+    let volume_24h       = raw["volume_24h"]["usd"].as_f64();
+    let market_cap       = raw["market_cap"]["usd"].as_f64();
+
+    let prev_price = feed_service::get_latest_snapshot(pool, &sub.id)
+        .await.ok().flatten().and_then(|s| s.price);
+
+    let snapshot = feed_service::insert_snapshot(
+        pool, &sub.id,
+        floor_price_usd, prev_price,
+        pct_change_24h, volume_24h, market_cap,
+        serde_json::json!([]),   // no OHLC on free tier
+        raw.clone(),
+    ).await?;
+
+    let _ = feed_service::prune_snapshots(pool, &sub.id, SNAPSHOT_KEEP).await;
+
+    if let Some(cur) = floor_price_usd {
+        let triggers: Vec<TriggerRule> =
+            serde_json::from_value(sub.triggers.clone()).unwrap_or_default();
+        for rule in &triggers {
+            evaluate_trigger(pool, sub, rule, cur, prev_price, pct_change_24h, &snapshot).await;
+        }
+    }
+
+    log::debug!("📡 NFT {} — floor: {:?}", sub.source_name, floor_price_usd);
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════
+// DeFi Protocol TVL — DeFiLlama /protocol/{slug}
+// ═══════════════════════════════════════════════════════════
+
+async fn poll_defi_tvl(pool: &PgPool, sub: &FeedSubscription) -> anyhow::Result<()> {
+    let url = format!("https://api.llama.fi/protocol/{}", sub.source_id);
+
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("Accept", "application/json")
+        .send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("DeFiLlama returned {}", resp.status());
+    }
+    let raw: serde_json::Value = resp.json().await?;
+
+    let tvl_history = raw["tvl"].as_array()
+        .ok_or_else(|| anyhow::anyhow!("No tvl array in DeFiLlama response"))?;
+
+    if tvl_history.is_empty() {
+        anyhow::bail!("Empty TVL history for {}", sub.source_id);
+    }
+
+    let current_tvl = tvl_history.last()
+        .and_then(|d| d["totalLiquidityUSD"].as_f64());
+    let prev_tvl = if tvl_history.len() >= 2 {
+        tvl_history[tvl_history.len() - 2]["totalLiquidityUSD"].as_f64()
+    } else {
+        None
+    };
+    let pct_change_24h = match (current_tvl, prev_tvl) {
+        (Some(cur), Some(prev)) if prev > 0.0 => Some((cur - prev) / prev * 100.0),
+        _ => None,
+    };
+
+    let candles = build_tvl_candles(tvl_history);
+
+    let prev_price = feed_service::get_latest_snapshot(pool, &sub.id)
+        .await.ok().flatten().and_then(|s| s.price);
+
+    let snapshot = feed_service::insert_snapshot(
+        pool, &sub.id,
+        current_tvl, prev_price,
+        pct_change_24h, None, None,
+        candles,
+        serde_json::json!({"protocol": sub.source_id}),
+    ).await?;
+
+    let _ = feed_service::prune_snapshots(pool, &sub.id, SNAPSHOT_KEEP).await;
+
+    if let Some(cur) = current_tvl {
+        let triggers: Vec<TriggerRule> =
+            serde_json::from_value(sub.triggers.clone()).unwrap_or_default();
+        for rule in &triggers {
+            evaluate_trigger(pool, sub, rule, cur, prev_price, pct_change_24h, &snapshot).await;
+        }
+    }
+
+    log::debug!("📡 TVL {} — {:?}", sub.source_name, current_tvl);
+    Ok(())
+}
+
+fn build_tvl_candles(tvl_history: &[serde_json::Value]) -> serde_json::Value {
+    let start = tvl_history.len().saturating_sub(31);
+    let window = &tvl_history[start..];
+
+    let candles: Vec<serde_json::Value> = window.windows(2)
+        .map(|pair| {
+            let time  = pair[1]["date"].as_i64().unwrap_or(0);
+            let open  = pair[0]["totalLiquidityUSD"].as_f64().unwrap_or(0.0);
+            let close = pair[1]["totalLiquidityUSD"].as_f64().unwrap_or(0.0);
+            serde_json::json!({
+                "time": time, "open": open,
+                "high": open.max(close), "low": open.min(close), "close": close,
+            })
+        })
+        .collect();
+
+    serde_json::Value::Array(candles)
+}
+
+// ═══════════════════════════════════════════════════════════
+// Fear & Greed Index — Alternative.me /fng/
+// ═══════════════════════════════════════════════════════════
+
+async fn poll_fear_greed(pool: &PgPool, sub: &FeedSubscription) -> anyhow::Result<()> {
+    let resp = reqwest::Client::new()
+        .get("https://api.alternative.me/fng/?limit=31")
+        .header("Accept", "application/json")
+        .send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("Fear & Greed API returned {}", resp.status());
+    }
+    let raw: serde_json::Value = resp.json().await?;
+
+    let data = raw["data"].as_array()
+        .ok_or_else(|| anyhow::anyhow!("No data in F&G response"))?;
+    if data.is_empty() {
+        anyhow::bail!("Empty F&G data");
+    }
+
+    // API returns newest-first
+    let today        = &data[0];
+    let current_val  = today["value"].as_str().and_then(|v| v.parse::<f64>().ok());
+    let classification = today["value_classification"]
+        .as_str().unwrap_or("Unknown").to_string();
+    let prev_val     = data.get(1)
+        .and_then(|d| d["value"].as_str())
+        .and_then(|v| v.parse::<f64>().ok());
+
+    let pct_change_24h = match (current_val, prev_val) {
+        (Some(cur), Some(prev)) if prev > 0.0 => Some((cur - prev) / prev * 100.0),
+        _ => None,
+    };
+
+    let candles = build_fng_candles(data);
+
+    let prev_price = feed_service::get_latest_snapshot(pool, &sub.id)
+        .await.ok().flatten().and_then(|s| s.price);
+
+    let raw_meta = serde_json::json!({ "classification": classification });
+
+    let snapshot = feed_service::insert_snapshot(
+        pool, &sub.id,
+        current_val, prev_price,
+        pct_change_24h, None, None,
+        candles,
+        raw_meta,
+    ).await?;
+
+    let _ = feed_service::prune_snapshots(pool, &sub.id, SNAPSHOT_KEEP).await;
+
+    if let Some(cur) = current_val {
+        let triggers: Vec<TriggerRule> =
+            serde_json::from_value(sub.triggers.clone()).unwrap_or_default();
+        for rule in &triggers {
+            evaluate_trigger(pool, sub, rule, cur, prev_price, pct_change_24h, &snapshot).await;
+        }
+    }
+
+    log::debug!("📡 Fear & Greed — {:?} ({})", current_val, classification);
+    Ok(())
+}
+
+fn build_fng_candles(data: &[serde_json::Value]) -> serde_json::Value {
+    // data is newest-first; take up to 31, reverse for ascending time
+    let mut asc: Vec<&serde_json::Value> = data.iter().take(31).collect();
+    asc.reverse();
+
+    let candles: Vec<serde_json::Value> = asc.windows(2)
+        .map(|pair| {
+            let time  = pair[1]["timestamp"].as_str()
+                .and_then(|t| t.parse::<i64>().ok()).unwrap_or(0);
+            let open  = pair[0]["value"].as_str()
+                .and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+            let close = pair[1]["value"].as_str()
+                .and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+            serde_json::json!({
+                "time": time, "open": open,
+                "high": open.max(close), "low": open.min(close), "close": close,
+            })
+        })
+        .collect();
+
+    serde_json::Value::Array(candles)
 }
