@@ -210,7 +210,9 @@ pub async fn update_profile(
             display_name = COALESCE($2, display_name),
             avatar_url = COALESCE($3, avatar_url),
             bio = COALESCE($4, bio),
-            last_username_change = CASE WHEN $1 IS NOT NULL AND $1 != username THEN NOW() ELSE last_username_change END
+            last_username_change = CASE WHEN $1 IS NOT NULL AND $1 != username THEN NOW() ELSE last_username_change END,
+            basename = COALESCE($6, basename),
+            basename_discoverable = COALESCE($7, basename_discoverable)
         WHERE wallet_address = $5
         RETURNING *
         "#
@@ -220,15 +222,19 @@ pub async fn update_profile(
     .bind(&req.avatar_url)
     .bind(&req.bio)
     .bind(&wallet_lower)
+    .bind(&req.basename)
+    .bind(req.basename_discoverable)
     .fetch_one(pool)
     .await?;
     
     Ok(updated)
 }
 
-/// Search profiles by username, wallet address, or inbox_id
+/// Search profiles by username, wallet address, inbox_id, or discoverable basename
 pub async fn search_profiles(pool: &DbPool, query: &str, limit: i64) -> Result<Vec<SearchResult>> {
     let search_pattern = format!("%{}%", query.to_lowercase());
+    // Strip .base.eth suffix if present so "alice.base.eth" matches stored "alice.base.eth"
+    let basename_pattern = format!("%{}%", query.to_lowercase().trim_end_matches(".base.eth"));
     
     let profiles = sqlx::query_as::<_, UserProfile>(
         r#"
@@ -238,19 +244,23 @@ pub async fn search_profiles(pool: &DbPool, query: &str, limit: i64) -> Result<V
             OR LOWER(display_name) LIKE $1
             OR LOWER(wallet_address) LIKE $1
             OR inbox_id = $2
+            OR (basename_discoverable = true AND LOWER(basename) LIKE $5)
         ORDER BY 
             CASE 
                 WHEN inbox_id = $2 THEN 0
-                WHEN LOWER(username) = $3 THEN 1 
-                ELSE 2 
+                WHEN LOWER(username) = $3 THEN 1
+                WHEN LOWER(basename) = $4 THEN 2
+                ELSE 3
             END,
             created_at DESC
-        LIMIT $4
+        LIMIT $6
         "#
     )
     .bind(&search_pattern)
-    .bind(query)  // Exact match for inbox_id
-    .bind(query.to_lowercase())
+    .bind(query)                    // Exact match for inbox_id
+    .bind(query.to_lowercase())     // Exact username match for ranking
+    .bind(query.to_lowercase())     // Exact basename match for ranking
+    .bind(&basename_pattern)        // LIKE match for basename (discoverable only)
     .bind(limit)
     .fetch_all(pool)
     .await?;

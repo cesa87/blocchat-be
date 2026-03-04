@@ -13,6 +13,8 @@ pub struct UserProfile {
     pub avatar_url: Option<String>,
     pub bio: Option<String>,
     pub last_username_change: Option<DateTime<Utc>>,
+    pub basename: Option<String>,
+    pub basename_discoverable: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -36,6 +38,8 @@ pub struct UpdateProfileRequest {
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
     pub bio: Option<String>,
+    pub basename: Option<String>,
+    pub basename_discoverable: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,6 +50,8 @@ pub struct ProfileResponse {
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
     pub bio: Option<String>,
+    pub basename: Option<String>,
+    pub basename_discoverable: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -58,6 +64,8 @@ impl From<UserProfile> for ProfileResponse {
             display_name: profile.display_name,
             avatar_url: profile.avatar_url,
             bio: profile.bio,
+            basename: profile.basename,
+            basename_discoverable: profile.basename_discoverable,
             created_at: profile.created_at,
         }
     }
@@ -70,6 +78,7 @@ pub struct SearchResult {
     pub username: Option<String>,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
+    pub basename: Option<String>,
 }
 
 impl From<UserProfile> for SearchResult {
@@ -80,6 +89,7 @@ impl From<UserProfile> for SearchResult {
             username: profile.username,
             display_name: profile.display_name,
             avatar_url: profile.avatar_url,
+            basename: profile.basename,
         }
     }
 }
